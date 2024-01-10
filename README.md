@@ -11,6 +11,16 @@ Additionally, data from the Bureau of Justice Statsitics has been used for resea
 Specifically, we are using the "Prisoners" data set to track incarcerations by state across years. As an example, the data from 2021 can be found here:
 https://bjs.ojp.gov/library/publications/prisoners-2021-statistical-tables
 
+# Research: Exoneration Rate Comparison
+
+
+# Research: Fitting Models
+
+
+
+
+
+
 The research is ongoing and a work in progress. Any and all mistakes found in this research can be attributed to Gavin Pierce. 
 
 Please inquire with any questions.
