@@ -1,0 +1,591 @@
+---
+title: "Biostatistics 544 | Final Project"
+subtitle: "University of Washington"
+author: "Gavin Pierce"
+date: "`r Sys.Date()`"
+output: pdf_document
+header-includes:
+  - \usepackage{subfig}
+  - \usepackage{longtable}
+bibliography: 544finalbib.bib
+nocite: |
+  @Ref1, @Ref2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(data.table)
+library(glmnet)
+library(knitr)
+library(MASS)
+library(lme4)
+library(pscl)
+library(DHARMa)
+library(groundhog)
+library(foreach)
+library(doParallel)
+
+
+
+boj_poi <- read_csv("BoJ_Poisson.csv")
+boj <-read_csv("BoJ Incarcerations Comp (2012-21).csv")
+inn_pro <- read_csv("UMIPdata.csv")
+
+# Prepare data: Select relevant variables; Set year 0-10 and as factor
+boj_poi <- boj_poi %>% 
+  dplyr::select(Year, State, Incar, Exon, IO, CIU, Exons100k, CIU_count, IO_count) %>% 
+  dplyr::mutate(year_less_2012 = as.factor(Year - 2012))
+
+```
+
+## Introduction
+
+Since 1989, there have been 3,412 exonerations tracked by the National Registry of Exonerations at the University of Michigan. Over the course of the past two decades, there has been a considerable rise in the implementation of Conviction Integrity Units in state justice departments, the acceptance of DNA evidence in court proceedings, and availability of Innocence Organizations to conduct independent research of potential wrongful incarcerations. Of these three factors, Innocence Organizations are central to our research, as they are dedicated solely to identifying and remedying wrongful incarcerations, and thus have the potential to lend insight into the rate of wrongful incarcerations. In understanding the role Innocence Organizations (IOs) play in exonerations, we will similarly aim to understand the impact Conviction Integrity Units (CIUs) have had on many of these exonerations, as they often work in conjunction with IOs to exonerate those who were unduly incarcerated.
+
+Our Scientific Question of interest is as follows: Is there an association between the presence of an Innocence Organization in a state and an increase in exonerations within that state?
+
+We have opted to analyze data from 2012-2021, due to consistent presence or lack of presence (fixed presence) of Innocence Organizations in all 50 states across this time period.
+
+## Exploratory Analysis
+
+To gain motivating insights, we can first consider rates of exoneration, by year, for states with Innocence Organizations and states without Innocence Organizations. To uniformly compare these groups, we can compare the number of exonerations across a set value of *incarceration years*. Each year an individual spends incarcerated in a state is counted as one person year. To compare across states, we can find the number of exonerations per 10,000 incarceration years (for one year) or per 100,000 incarceration years (for 10 year span). 
+
+To further clarify, consider the rate of exonerations for Washington state from 2012:
+
+$$Washington \space (2012): 17,271  \space individuals \space in \space prison = 17,271 \space incarceration \space years	$$
+$$Washington \space (2012): 3 \space exonerations$$
+$$\frac{3 \space exonerations}{17,271 \space incarceration \space years } = \frac{1.74 \space exonerations}{10,000 \space incarceration \space years}$$
+In keeping, we can  assess the exoneration rates per 100,000 incarceration years across all 50 states from 2012-2021, stratifying by states with and without innocence organizations.
+
+We witness a higher proportion of states without IOs well below the national average, with only two of the eight states without IOs above the national average. Of note, while it may be difficult to quantify, there may be sociopolitical differences within the no IO groups between the states two highest exoneration rates and the remaining states within the group.
+
+***
+
+```{r, fig.align='center',fig.cap="Exoneration Rates by State (1989-2021)",fig.width=7, fig.height=3,echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE}
+
+boj <- boj %>% 
+  rename(State = ...1)
+
+boj$State <- reorder(boj$State, boj$Exons100k)
+
+ggplot(boj, aes(x = State, y = Exons100k, fill = factor(IO_binary)))+
+  geom_bar(stat="identity")+
+  scale_fill_manual(values = c("red", "lightsteelblue3", "gray"), labels = c("No IO", "IO", "USA")) +
+  labs(x = "States", y = "Exonerations Per 100k Incarceration Years") +
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size=8))+
+  guides(fill = guide_legend(title = "Innocence Org."))
+
+```
+
+Continuing with our exploratory analysis, we can now consider the pattern of exonerations and their relationship to that of the IOs and CIUs. We witness a clear trend of IO and CIU involvement in the exoneration, especially within the most recent decade. Further, we also witness a trend where very few exonerations occur without any involvement of either a CIU, an IO, or both. 
+
+Of note, there does appear to be a pattern of IO and CIU involvement following the same rate of involvement in exonerations, perhaps indicating CIU is a confounder. Collinearity might be of concern as well.
+
+***
+
+```{r, fig.align='center', fig.cap= "Annual U.S. Exonerations Overlaid with CIU and IO Involvement", fig.width=7, fig.height=3,echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE}
+
+# Count exonerations per year
+exonerations_per_year <- inn_pro %>%
+  group_by(Exonerated) %>%
+  tally(name = "total_exonerations")
+
+# Count IO, CIU, and DNA tags by year
+io_counts <- inn_pro %>%
+  separate_rows(Tags, sep = ";") %>%
+  filter(str_detect(Tags, "IO")) %>%
+  group_by(Exonerated) %>%
+  tally(name = "IO_count")
+
+ciu_counts <- inn_pro %>%
+  separate_rows(Tags, sep = ";") %>%
+  filter(str_detect(Tags, "CIU")) %>%
+  group_by(Exonerated) %>%
+  tally(name = "CIU_count")
+
+dna_counts <- inn_pro %>%
+  filter(DNA == "DNA") %>%
+  group_by(Exonerated) %>%
+  tally(name = "DNA_count")
+
+# Join all counts
+annual_counts <- left_join(exonerations_per_year, io_counts, by = "Exonerated") %>%
+  left_join(ciu_counts, by = "Exonerated") %>%
+  left_join(dna_counts, by = "Exonerated") %>%
+  replace_na(list(IO_count = 0, CIU_count = 0, DNA_count = 0))
+
+# Compute counts for cases without IO, DNA, or CIU tags for each year
+annual_counts$no_tags_count <- annual_counts$total_exonerations - (annual_counts$IO_count + annual_counts$DNA_count + annual_counts$CIU_count)
+
+#Prevent negatives 
+annual_counts$no_tags_count[annual_counts$no_tags_count < 0] <- 0
+
+# Plot
+ggplot(annual_counts, aes(x = Exonerated)) +
+  geom_bar(aes(y = total_exonerations, fill = "Total Exonerations"), stat = "identity", alpha = 0.6) +
+  geom_line(aes(y = IO_count, color = "Innocence Organization", group = 1), size = 1) +
+  geom_line(aes(y = CIU_count, color = "Conviction Integrity Unit", group = 1), size = 1) +
+  geom_line(aes(y = no_tags_count, color = "No IO or CIU", group = 1), size = 1, linetype = "dashed") +
+  labs(x = "Year", y = "Exonerations") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = "grey50", name = "Annual U.S. Count") +
+  scale_color_manual(values = c("deeppink", "seagreen2", "black"), name = "Variables of Interest") +
+  guides(fill = guide_legend(override.aes = list(alpha = 1)))
+
+
+#  geom_line(aes(y = DNA_count, color = "DNA", group = 1), size = 1) +
+# , "darkviolet"
+
+
+```
+
+***
+
+## Data Description
+
+Analysis will employ data from two primary datasets. The National Registry of Exonerations provides thorough data on all exonerations occurring since 1989, including state and year of conviction and exoneration, the presence of innocence organization involvement (or lack thereof), demographic details, grounds for exoneration, and more. Data from this dataset has been aggregated to state level to allow for insights into to demographic, exoneration, and other trends, but remains available as point data as needed. This is publicly available data but does requiring signing a consent form prior to viewing the raw dataset.
+
+The second source of data stems from the Bureau of Justice Prisoners series, which has been tracking data on state and national incarcerations since 1926. While there is substantial data available in these datasets, we are primarily concerned with incarceration counts from each state stemming back to 1989. Due to the datasets being isolated to individual years, preprocessing occurred to compile yearly state data into one dataset. This is publicly available data.
+
+Definitions for our variables of interest were interpreted from The National Registry of Exonerations.
+
+- Exoneration (Exon): Occurs when an individual is convicted of a crime and, following a post-conviction re-examination of the evidence in the case, was relieved of all the consequences of the criminal conviction by pardon, acquittal, or dismissal.*Outcome of interest, Count data; per state by year*
+
+- Innocence Organization (IO): An organization dedicated solely to exoneration of wrongfully convicted individuals. *Predictor of interest, Binary data; Present or not present within a state for all years 2012-2021. Note: Count data for IO per state by year is available as well*
+
+- Conviction Integrity Unit (CIU): State judicial regulatory body entrusted with monitoring convictions. *Potential Confounder, Count data; Occurs in data as subset of Exon*
+
+- Incarceration Year(s): Representing the presence of an individual in state prison for one year.
+*Offset, Count data. Used to standardize across states. eg. Exonerations per 100,000 incarceration years*
+
+- State(s): Individual territorial units in United States. Defined by having unique sociopolitical factors and laws which we hypothesize have an impact on the rate of exonerations in the state. *Random Effects; Categorical data*
+
+***
+
+## Methods: Poisson GLMM Model
+
+Being that our data presents as a combination of count, binary, and categorical data and we aim to model rates of exonerations across states, we initially aimed to fit a Generalized Linear Mixed Model (GLMM) model with a Poisson distribution. All variables were defined as above.
+
+The primary assumptions of a Poisson model are as follows:
+
+- Independence of events;
+- Rates can be modeled;
+- No simultaneous events;
+- Equidispersion: Mean is equal to variance
+
+Of these, the most commonly violated assumptions is that of Equidispersion. Upon fitting the model, our next step was to confirm equidispersion of the data.
+
+To assess equidispersion of a GLMM, we can consider sum of squared Pearson residuals divided by the degrees of freedom of the model. This can be presented as follows:
+
+$$ Dispersion Ratio = \frac{Sum (Pearson Residuals^2)}{df_{Poisson GLMM}}$$
+$$ = \frac{686.1456}{487}$$
+$$= 1.41$$
+
+Of note, we attempted to fit the model using count IO data, but ran into continuous convergence issues. The binary variable IO allowed for fitting to the Poisson, even with the violation of the assumption, while count IO data did not.
+
+
+```{r Poisson Eval, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE}
+
+###################################
+###### Evaluate Poisson GLMM ######
+###################################
+
+### Basic Poisson Model (w/ Extended Analysis Time Frame)
+
+model.poi.ct <- glmer(Exon ~ IO + CIU_count + year_less_2012 + offset(log(Incar)) + (1 | State), 
+                       family = poisson, data = boj_poi,
+                       control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+
+#summary(model.poi.ct)
+
+##############################
+# Overdispersion
+
+observed_deviance <- sum(resid(model.poi.ct, type = "pearson")^2)
+df <- df.residual(model.poi.ct)
+overdispersion_param = observed_deviance / df
+
+### 1.41, so consider Negative Binomial Model ###
+
+```
+
+## Assessing Alternative Models
+
+The intuitive alternative GLMM models to Poisson are Negative Binomial and Zero-Inflated versions of Poisson and Negative binomials. Thus we fit a Negative Binomial GLMM, a Zero-Inflated Poisson GLMM, and a Zero-Inflated Negative Binomial GLMM. 
+
+To assess the appropriateness of these models relative to each other, we can compare their respective Akaike Information Criterion (AIC) & Bayesian Information Criterion (BIC) scores. AIC and BIC are metrics for assessing the balance between goodness of fit and model complexity, with BIC providing greater penalty for more complexity than AIC does. The lower the scores, the superior relative fit to other models. 
+
+Of the four models considered, it appears the basic Negative Binomial model is the superior fit of the four, with both the lowest AIC and BIC scores. Thus, we can move forward with the Negative Binomial as our model of choice.
+
+
+```{r Alternative Models, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE}
+
+################################
+###### Alternative Models ######
+################################
+
+
+############  Negative Binomial  ######
+# Scale CIU to make more flexible for model (eliminate convergence issues)
+boj_poi$CIU_count <- scale(boj_poi$CIU_count)
+
+###### Negative Binomial (IO Binary) ###### 
+model.nb.ct <- glmer.nb(Exon ~ IO + CIU_count + year_less_2012 + offset(log(Incar)) 
+                        + (1 | State), 
+                        data = boj_poi,
+                        control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+
+###### Negative Binomial (IO Count) ###### 
+model.nb.ct2 <- glmer.nb(Exon ~ IO_count + CIU_count + year_less_2012 + offset(log(Incar)) 
+                        + (1 | State), 
+                        data = boj_poi,
+                        control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+
+###### Zero inflated Poisson ######
+zip_model_ct <- zeroinfl(Exon ~ IO + CIU_count + year_less_2012 + offset(log(Incar)) | State, 
+                      data = boj_poi)
+
+
+
+
+###### Zero-Inflation Negative Binomial Model ######
+
+zinb_model_ct <- zeroinfl(Exon ~ IO + CIU_count + year_less_2012 + offset(log(Incar)) | State, 
+                       data = boj_poi, 
+                       dist = "negbin")
+
+
+#### Evaluate Fits of Models ####
+
+# AIC
+aic_poisson <- AIC(model.poi.ct)
+aic_nb <- AIC(model.nb.ct)
+aic_zinb <- AIC(zinb_model_ct)
+aic_zip <- AIC(zip_model_ct)
+# BIC
+bic_poisson <- BIC(model.poi.ct)
+bic_nb <- BIC(model.nb.ct)
+bic_zinb <- BIC(zinb_model_ct)
+bic_zip <- BIC(zip_model_ct)
+
+# Create a data frame to display the results
+comparison_df <- data.frame(
+  Model = c("Poisson", "Negative Binomial","Zero-Inflated Poisson" ,"Zero-Inflated Neg. Binomial"),
+  AIC = c(aic_poisson, aic_nb, aic_zip, aic_zinb),
+  BIC = c(bic_poisson, bic_nb, bic_zip, bic_zinb)
+)
+
+kable(comparison_df)
+```
+
+To evaluate how well the Negative Binomial model fits our data, we can begin by mapping the Pearson residuals. The residuals do not appear too extreme; however, the spread of residuals near the lower fitted values of the model range up towards the mid single digits, which may be reflective of an poor fit for certain data points.
+
+***
+
+```{r, fig.show="hold", echo=FALSE, fig.height=3, fig.width=6, fig.cap="Pearson Residuals for Negative Binomial Model", warning=FALSE, message=FALSE, cache=TRUE}
+
+##########################################
+###### Evaluate Neg. Binomial Model ######
+##########################################
+
+### Plot Pearson Residuals ###
+# Appropriate for NB model / count models with non-constant variance
+plot(fitted(model.nb.ct), residuals(model.nb.ct, type="pearson"),
+     xlab = "Neg. Binomial Fitted Values", 
+     ylab = "Pearson Residuals")
+
+```
+
+
+\newpage
+
+## DHARMa Residuals
+
+Additionally, we can simulate residuals of our models using the DHARMa (Diagnostic for HierArchical Regression Models) package. The package creates 250 simulations to model a distribution of simluated responses, which are then compared to the observed data. The residuals from these simulated responses are then mapped.
+
+A superior model using the DHARMa residuals approach is expected to have uniform residuals across all metrics,
+
+The Negative Binomial model appears to have strong simulated residuals, with the exception of the around the first quantile. This is reflective of the previously discuss issue in the Pearson residual plot, where the residuals ranged fairly high for the normal values.
+
+Additionally, we can compare our primary Negative Binomial model, which uses binary IO as a variable, to that of a Negative Binomial model which uses the count data as the IO variable. The Negative Binomial model using binary IO appears to be a significantly superior fit.
+
+```{r, fig.show="hold", out.width="50%", fig.cap="Imputed Residuals: Negative Binomial Models", fig.subcap=c("Binary IO Variable","Count IO Variable"),echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE}
+
+######################
+##### Dharma plot ####
+######################
+plot(simulateResiduals(fittedModel = model.nb.ct))
+plot(simulateResiduals(fittedModel = model.nb.ct2))
+
+
+```
+***
+
+## Results
+
+Upon assessing the fit of the model and finding sufficient evidence of a fit worth considering, we can then consider the results of our model, which is defined as follows:
+
+$$log(\widehat{Exons}_{ij}) = \beta_0 + \beta_1 \cdot IO_{ij} + \beta_2 \cdot CIU\_count_{ij} + \beta_3 \cdot Year_{j} + \gamma_i + \log(\text{IncarYears}_{ij}) $$
+$$Y_{ij} \sim \text{NegativeBinomial}(\mu_{ij}, \theta)$$
+
+After controlling for Conviction Integrity Units (CIU) and Year, coefficient on $IO_{ij}$ is 0.889, which we can then exponentiate to find the Incidence Rate Ratio (IRR) of exonerations of states with Innocence Organizations to expected rate of states without exonerations.
+
+$$e^{0.889} = 2.432$$
+Thus, the expected IRR of exonerations for states with Innocence Organizations is 2.432 times that of states without Innocence Organizations (95% CI: 1.328-4.576; p-value = 0.004).
+
+Therefore, we see statistically significant evidence from our initial model there is a difference in rates of exonerations between states with and without IOs.  
+
+```{r Coef IO, echo=FALSE,warning=FALSE, message=FALSE, cache=TRUE}
+
+# Summary
+summary_model <- summary(model.nb.ct)
+io_coefficient <- summary_model$coefficients["IO", "Estimate"]
+io_stderr <- summary_model$coefficients["IO", "Std. Error"]
+io_pvalue <- summary_model$coefficients["IO", "Pr(>|z|)"]
+
+# CI
+ci <- confint(model.nb.ct)
+io_ci <- ci["IO", ]
+
+# CI Table
+io_table <- data.frame(
+  Variable = "IO",
+  Estimate = io_coefficient,
+  "Std Error" = io_stderr,
+  "Lower CI" = io_ci[1],  
+  "Upper CI" = io_ci[2],  
+  "p-value" = io_pvalue
+)
+
+# Nice lil table
+kable(io_table, caption = "Coefficient, Standard Error, Confidence Interval, and P-Value for IO Variable", digits = 3)
+
+####
+
+# Expo CI
+io_coefficient_exp <- exp(io_coefficient)
+io_ci_lower_exp <- exp(io_ci[1])
+io_ci_upper_exp <- exp(io_ci[2])
+
+
+io_table_exp <- data.frame(
+  Variable = "IO",
+  "Estimate" = io_coefficient_exp,
+  "Std Error" = io_stderr,
+  "Lower CI" = io_ci_lower_exp,
+  "Upper CI" = io_ci_upper_exp,
+  "p-value" = io_pvalue
+)
+
+
+# Nice lil table 2
+kable(io_table_exp, caption = "Exponentiated Coefficient, Standard Error, Confidence Interval, and P-Value for IO Variable", digits = 3)
+
+
+```
+
+## Validation of Results
+
+To ensure we can be confident in our results, we can run permutation tests to validate the statistical significance of our test. By running 1000 simulations and permuting our IO labels, we can gain insights into whether the results of our findings are independent of sociopolitical factors.
+
+A noted limitation in our process is the availability of desired models to permute. Our ideal scenario involved permuting on IO within state outcomes, which requires IO count data. However, due to convergence issues of fitting the Negative Binomial GLMM with count OI data, we opted to use a Negative Binomial GLMM with a binary IO variable. In this instance we were required to do a "global" permutation, which permutes the IO variable and rates of exonerations across all states and years. This process breaks the association between state-specfic factors and exoneration and limits our interpretation to an extent. In future studies we will aim to incorporate count IO to exact a more granular analysis.
+
+In our permutation model, we simulated exoneration rates for states with and without the presence of an IO. In our results, we find the *permuted* exoneration rate differences to all reside below the *actual* exoneration rate differences between states with an IO compared to states without an IO. Interpreted as a p-value, we have further evidence that the results of our observed data is statistically significant. 
+
+```{r perm, fig.height=3, fig.width=6, fig.cap="Density Plot of Permuted Rate Differences with Original Rate Difference", echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+
+#####################################
+##### Global Permutations on IO ##### 
+#####################################
+
+registerDoParallel(cores = 6)
+
+# Basic Sim Function
+sim_perm_trial <- function(data) {
+    perm <- sample(data$IO)
+    data$IO <- perm
+
+    perm_model <- try(glmer.nb(Exon ~ IO + CIU_count + year_less_2012 + offset(log(Incar)) + (1 | State), 
+                              data = data, 
+                              control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 50000))),
+                      silent = TRUE)
+
+    if (class(perm_model) == "try-error") {
+        return(NA)  
+    } else {
+        perm_predictions <- predict(perm_model, type = "response")
+        mean_rate_1 <- mean(perm_predictions[data$IO == 1])
+        mean_rate_0 <- mean(perm_predictions[data$IO == 0])
+        rate_diff <- mean_rate_1 - mean_rate_0
+
+        return(rate_diff)
+    }
+}
+
+# Parallel Sims
+nsim <- 1000
+set.seed(1234)
+
+registerDoParallel(cores = 6)
+
+perm_rates <- foreach(i = 1:nsim, .combine = 'c', .packages = 'lme4') %dopar% {
+    sim_perm_trial(boj_poi)
+}
+
+# Original Model
+og_model <- glmer.nb(Exon ~ IO + CIU_count + year_less_2012 + offset(log(Incar)) + (1 | State), 
+                     data = boj_poi,
+                     control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+
+# Original Predictions
+original_predictions <- predict(og_model, type = "response")
+original_rate_1 <- mean(original_predictions[boj_poi$IO == 1])
+original_rate_0 <- mean(original_predictions[boj_poi$IO == 0])
+original_rate_diff <- original_rate_1 - original_rate_0
+
+# Exclude NA values from perm_rates
+perm_rates <- na.omit(perm_rates)
+
+# p-value
+p_value <- mean(perm_rates >= original_rate_diff)
+
+# Plot IO Differences
+ggplot(data.frame(perm_rates), aes(x = perm_rates)) +
+    geom_density() +
+    geom_vline(xintercept = original_rate_diff, colour = "red") +
+    xlab("Permuted Rate Differences") +
+    ylab("Density") +
+    theme_light()
+
+
+
+```
+
+\newpage
+
+## Bootstrapping Confidence Intervals
+
+Similar to our process of examining statistical significance by simulating difference in estimated rates, we can now use bootstrapping to estimate confidence intervals for our data. By bootstrapping across our data and creating simulated confidence intervals, we are able to gauge whether the confidence interval of our observed data (95% CI: 1.328-4.576) is representative as statistically significant by evaluating 1000 bootstrapped CIs.
+
+Our resulting bootstrapped confidence intervals support the confidence interval of our observed data, with a simulated 95% confidence interval of 1.367-3.315. Being that 1 is well outside of this interval we can be confident our observed confidence interval for our IRR is statistically significant, strengthening further our findings that the presence of an Innocence Organization in a state impacts the rate of exonerations in that state.
+
+```{r boot, echo=FALSE,cache=TRUE, warning=FALSE, message=FALSE, eval=TRUE}
+
+#############################
+##### Bootstrapping CIs #####
+#############################
+
+registerDoParallel(cores = 6) 
+
+bootstrap_negbin <- function(data, n_bootstrap, n_coef) {
+  boot_coef <- foreach(i = 1:n_bootstrap, .combine = rbind, .packages = 'lme4') %dopar% {
+    resampled_data <- data[sample(nrow(data), replace = TRUE), ]
+
+    boot_model <- tryCatch({
+      glmer.nb(Exon ~ IO + CIU_count + year_less_2012 + offset(log(Incar)) + (1 | State), 
+               data = resampled_data,
+               control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+    }, error = function(e) NULL)  
+    
+    if (!is.null(boot_model) && inherits(boot_model, "merMod")) {
+      fixef(boot_model)
+    } else {
+      rep(NA, n_coef)  
+    }
+  }
+
+  boot_coef
+}
+
+
+# Number of coefficients
+n_coef <- 12
+
+# Bootstrap
+set.seed(123)  
+n_bootstrap <- 206
+boot_results <- bootstrap_negbin(boj_poi, n_bootstrap, n_coef)
+
+# IO Coef
+io_coef <- boot_results[, 2]
+
+# Expo IO Coef
+exp_io_coef <- exp(io_coef)
+
+# Exp CI 
+exp_ci_lower <- quantile(exp_io_coef, probs = 0.025, na.rm = TRUE)
+exp_ci_upper <- quantile(exp_io_coef, probs = 0.975, na.rm = TRUE)
+exp_ci <- c(lower = exp_ci_lower, upper = exp_ci_upper)
+
+
+```
+
+
+```{r, fig.height=3, fig.width=6, fig.cap="Boostrapped Confidence Intervals: Negative Binomial",echo=FALSE,cache=TRUE, warning=FALSE, message=FALSE, eval=TRUE}
+
+#############################
+##### Bootstrapping CIs #####
+#############################
+
+
+### Plot Boot Coef
+ggplot(data.frame(exp_io_coef = exp_io_coef), aes(x = exp_io_coef)) + 
+  geom_histogram(aes(y = ..density..), binwidth = 0.02) +
+  geom_vline(xintercept = mean(exp_io_coef), color = "red") +
+  geom_vline(xintercept = exp_ci["lower"], linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = exp_ci["upper"], linetype = "dashed", color = "blue") +
+  xlab("Exponentiated IO Coefficient") +  
+  ylab("Density")  
+
+# 95% Exp CI
+exp_quantiles <- quantile(exp_io_coef, c(0.05, 0.95))
+
+# Diff in Mean 95% CI
+distance_from_mean <- exp_quantiles - mean(exp_io_coef)
+
+# Exp Mean CI 
+exp_ci <- mean(exp_io_coef) - distance_from_mean[c(2, 1)]
+
+# The confidence interval
+#exp_ci
+
+
+
+```
+
+
+## Discussion
+
+The results of our analysis our promising, but not without caveats. Our statistically significant findings of a noteworthy Incidence Rate Ratio supports our initially conjecture there exists an association between the presence on an Innocence Organization in a state and the related rate of exonerations in that state. Such findings support further research into this relationship, including the evaluation of qualitative sociopolitical factors that has the potential to be considered as quantitative data. Uncovering such data may prove to be challenging, but may ultimately offer the most insight into the state specific factors which impact exoneration rates alongside Innocence Organizations and Conviction Integrity Units.
+
+Our study was limited by our inability to fit an effective model to our preferred count IO data. Further evaluation of models, including non-parametric approaches, are warranted. The ultimately goal of not only fitting a model to count IO data, but doing so on data ranging back to 1989, remains our primary focus as we continue with the research moving forward.
+
+
+***
+\newpage
+
+\begin{center}
+REFERENCES 
+\end{center}
+
+***
+
+<div id="refs"></div>
+
+
+
+
+
+
+\pagebreak
+## Code Appendix
+
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+```
