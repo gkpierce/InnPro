@@ -13,6 +13,7 @@ https://bjs.ojp.gov/library/publications/prisoners-2021-statistical-tables
 
 # Research: Exoneration Rate Comparison
 
+Our primary focus here is to develop a method for comparing exoneration rates for U.S. states, with the end goal of identifying the number wrongfully incarcerated individuals who, under ideal conditions, would have been exonerated. To do so, we combined the above data sets to identify the number of exonerations per 100,000 individuals incarcerated. 
 
 # Research: Fitting Models
 
