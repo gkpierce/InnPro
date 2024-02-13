@@ -17,7 +17,7 @@ Our primary focus here is to develop a method for comparing exoneration rates fo
 
 # Research: Fitting Models
 
-My attempts to fit collected data to well-established parametric models. Data presents as "count" data and primary goal is comparing rates, so I began with the intuitive step of attempting to fit a Poisson regression model. Subsequent step involved evaluating this Poisson model against a negative binomial model, as well as zero-inflated versions of Poisson and negative binonmial. Tradtional methods for evaluating model fits such as AIC / BIC and assessing Pearson residuals were employed in conjunction with machine learning techniques, such as DHARMa residuals, permuting on predictor of interest, and bootsrapping confidence intervals. Findings are preliminary and research is ongoing.
+My attempts to fit collected data to well-established parametric models. Data presents as "count" data and primary goal is comparing rates, so I began with the intuitive step of attempting to fit a Poisson regression model. Subsequent steps involved evaluating this Poisson model against a negative binomial model, as well as zero-inflated versions of Poisson and negative binonmial. Tradtional methods for evaluating model fits such as AIC / BIC and assessing Pearson residuals were employed in conjunction with machine learning techniques, such as DHARMa residuals, permuting on predictor of interest, and bootsrapping confidence intervals. Findings are preliminary and research is ongoing.
 
 # Research: Spatiotemporal Modeling
 
