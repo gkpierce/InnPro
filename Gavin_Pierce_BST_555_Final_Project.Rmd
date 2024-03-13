@@ -1,0 +1,189 @@
+---
+title: "Biostatistics 555 | Final Project"
+author: "Gavin Pierce"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(dplyr)
+library(knitr)
+library(sf)
+library(ggplot2)
+library(INLA)
+
+inn_pro <- read_csv("UMIPdata555.csv")
+
+```
+
+## BACKGROUND
+
+```{r, echo=FALSE}
+
+
+# USA filtered data
+us_cases <- inn_pro %>%
+  select(State, County, OM, Exonerated) %>%
+  mutate(OM = ifelse(OM == "OM", "OM", "NoM"),
+         Exonerated = as.numeric(format(as.Date(Exonerated, format="%m/%d/%Y"), "%Y")))  
+
+us_cases <- us_cases %>%
+  mutate(OM = ifelse(is.na(OM), "NoM", OM))
+
+
+```
+
+
+```{r, echo=FALSE}
+
+exonerated_summary_by_state <- us_cases %>%
+  group_by(State, OM) %>%
+  summarise(Total_Exonerated = n(), .groups = 'drop')
+
+# Pivot the data to compare "OM" vs "NoM" within each state
+exonerated_pivot_by_state <- exonerated_summary_by_state %>%
+  pivot_wider(names_from = OM, values_from = Total_Exonerated, values_fill = list(Total_Exonerated = 0))
+
+
+
+# Geospatial for USA states
+us_states_geop <- st_read("usa.gpkg_2")  
+
+# Join spatial with data
+geop_with_exonerated_states <- us_states_geop %>%
+  left_join(exonerated_pivot_by_state, by = c("adm1_name" = "State"))  
+
+glimpse(exonerated_summary_by_state)
+exonerated_summary_by_state
+```
+
+```{r, echo=FALSE}
+
+# Calculate the proportion of "OM" exonerations by state
+geop_with_exonerated_states <- geop_with_exonerated_states %>%
+  mutate(OM_Rate = OM / (OM + NoM))  # Calculate the proportion of "OM"
+
+# Visualize the proportion of "OM" exonerations by state on a map
+ggplot(data = geop_with_exonerated_states) +
+  geom_sf(aes(fill = OM_Rate), color = NA) +
+  scale_fill_gradient(low = "white", high = "blue", na.value = "grey", name = "Proportion of OM Exonerations") +
+  theme_minimal() +
+  labs(title = "Proportion of OM Exonerations by State in the US")
+
+ggplot(data = us_states_geop) +
+  geom_sf() +  # No need to specify fill or color if the defaults are acceptable
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +  # Adjust these limits as needed
+  labs(title = "Map of the United States") +
+  theme_minimal()
+
+ggplot(data = geop_with_exonerated_states) +
+  geom_sf(aes(fill = OM_Rate), color = NA) +  # Fill states based on 'OM_Rate'
+  scale_fill_gradient(low = "rosybrown1", high = "blue", na.value = "grey", name = "Proportion of OM Exonerations") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +  # Focus map on the mainland U.S.
+  labs(title = "Proportion of OM Exonerations by State in the US") +
+  theme_bw()
+
+```
+
+```{r, echo=FALSE}
+#######################
+### Posterior Means ###
+#######################
+
+
+library(tidyverse)
+library(INLA)
+library(sf)
+library(ggplot2)
+
+# Assuming us_cases and us_states_geop are already loaded and prepared
+
+# Aggregate exoneration data by state
+exonerations_aggregated <- us_cases %>%
+  group_by(State) %>%
+  summarise(OM_Count = sum(OM == "OM", na.rm = TRUE),
+            Total_Count = n(), 
+            .groups = 'drop') %>%
+  mutate(Proportion_OM = OM_Count / Total_Count)
+
+# Running the INLA model
+formula <- OM_Count ~ 1 + f(State, model = "iid")
+result <- inla(formula,
+               family = "binomial",
+               data = exonerations_aggregated,
+               Ntrials = exonerations_aggregated$Total_Count,
+               control.compute = list(dic = TRUE, waic = TRUE),
+               verbose = TRUE)
+
+# State ID to Name Mapping
+state_id_name_mapping <- data.frame(
+  State_ID = 1:84,
+  Name = c("Alabama", "Alaska", "Arizona", "Arkansas", "California",
+           "Colorado", "Connecticut", "Delaware", "District of Columbia",
+           "Fed-AL", "Fed-AZ", "Fed-CA", "Fed-CT", "Fed-DC", "Fed-DE",
+           "Fed-FL", "Fed-IL", "Fed-KY", "Fed-LA", "Fed-MA", "Fed-MD",
+           "Fed-MI", "Fed-MN", "Fed-MO", "Fed-MT", "Fed-Military", "Fed-ND",
+           "Fed-NJ", "Fed-NM", "Fed-NV", "Fed-NY", "Fed-OH", "Fed-OK", 
+           "Fed-PA", "Fed-SD", "Fed-TN", "Fed-TX", "Fed-VA", "Fed-WA",
+           "Fed-WI", "Florida", "Georgia", "Guam", "Hawaii", "Idaho",
+           "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana",
+           "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota",
+           "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada",
+           "New Hampshire", "New Jersey", "New Mexico", "New York", 
+           "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon",
+           "Pennsylvania", "Puerto Rico", "Rhode Island", "South Carolina",
+           "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", 
+           "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming")
+)
+
+# Assuming state_id_name_mapping has been correctly set up as shown previously
+
+# Extracting posterior means directly from fitted values
+# Assuming the order of fitted.Predictor.xx corresponds directly to the order in state_id_name_mapping
+posterior_means <- result$summary.fitted.values$mean
+posterior_sds <- result$summary.fitted.values$sd
+
+# Create a mapping from Predictor IDs to State Names
+predictor_to_state <- state_id_name_mapping$Name  # Ensure this is correctly ordered
+
+# Create a data frame for mapping
+posterior_df <- data.frame(State = predictor_to_state, 
+                           PosteriorMean = posterior_means,
+                           PosteriorSD = posterior_sds)
+# Merge with geospatial data
+map_data <- merge(us_states_geop, posterior_df, by.x = "adm1_name", by.y = "State", all.x = TRUE)
+
+# Visualization with ggplot2
+ggplot(data = map_data) +
+  geom_sf(aes(fill = PosteriorMean), color = "white") +  
+  scale_fill_gradient(low = "rosybrown1", high = "blue", na.value = "grey", name = "Proportion of OM Exonerations") +
+  labs(title = "Proportion of OM Exonerations by State in the US", subtitle = "Based on INLA Model") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE)
+
+```
+
+```{r, echo=FALSE}
+####################
+### Posterior SD ###
+####################
+
+ggplot(data = map_data) +
+  geom_sf(aes(fill = PosteriorSD), color = "white") +  
+  scale_fill_gradient(low = "springgreen", high = "darkgreen", name = "Standard Deviation of Proportion") +
+  labs(title = "Standard Deviation of OM Exonerations Proportion by State in the US", subtitle = "Based on INLA Model") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE)
+```
+
+## Code Appendix
+
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+
+
+```
